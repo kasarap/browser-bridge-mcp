@@ -44,7 +44,19 @@ async def _connect() -> Page:
     pw: PlaywrightContextManager = await async_playwright().start()
     browser: Browser = await pw.chromium.launch(
         headless=True,
-        args=["--no-sandbox", "--disable-dev-shm-usage"],
+        args=[
+            "--no-sandbox",
+            "--disable-dev-shm-usage",
+            # ignore_https_errors (below) covers page navigation/subresources
+            # via CDP, but the KasmVNC video stream rides a separate wss://
+            # WebSocket that the self-signed cert can silently block at the
+            # browser-process network-stack level -- these flags force the
+            # trust bypass process-wide, not just at the CDP/context layer,
+            # which is what the page load alone doesn't reach.
+            "--ignore-certificate-errors",
+            "--ignore-certificate-errors-spki-list",
+            "--allow-insecure-localhost",
+        ],
     )
     context = await browser.new_context(
         ignore_https_errors=True,  # avoids the native cert-warning interstitial entirely
