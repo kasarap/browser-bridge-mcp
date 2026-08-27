@@ -37,10 +37,35 @@ mcp = FastMCP("browser-bridge")
 
 _state: dict = {"playwright": None, "browser": None, "page": None}
 _lock = asyncio.Lock()
+_events: list = []  # rolling diagnostic log: console messages, page errors, failed requests, websocket lifecycle
+_EVENTS_MAX = 200
+
+
+def _log_event(line: str) -> None:
+    _events.append(line)
+    del _events[:-_EVENTS_MAX]
+
+
+def _wire_diagnostics(page: Page) -> None:
+    """Attach listeners so `diagnostics()` can show what actually happened,
+    instead of us guessing at why the stream never starts."""
+    page.on("console", lambda msg: _log_event(f"[console:{msg.type}] {msg.text}"))
+    page.on("pageerror", lambda exc: _log_event(f"[pageerror] {exc}"))
+    page.on("requestfailed", lambda req: _log_event(
+        f"[requestfailed] {req.method} {req.url} -> {req.failure}"
+    ))
+
+    def _on_websocket(ws):
+        _log_event(f"[websocket:open] {ws.url}")
+        ws.on("close", lambda: _log_event(f"[websocket:close] {ws.url}"))
+        ws.on("socketerror", lambda err: _log_event(f"[websocket:error] {ws.url} -> {err}"))
+
+    page.on("websocket", _on_websocket)
 
 
 async def _connect() -> Page:
     """Launch (or relaunch) a headless Chromium that loads the noVNC page."""
+    _events.clear()
     pw: PlaywrightContextManager = await async_playwright().start()
     browser: Browser = await pw.chromium.launch(
         headless=True,
@@ -73,6 +98,7 @@ async def _connect() -> Page:
         viewport={"width": VIEWPORT_WIDTH, "height": VIEWPORT_HEIGHT},
     )
     page = await context.new_page()
+    _wire_diagnostics(page)
     await page.goto(TARGET_URL, wait_until="networkidle", timeout=30000)
     # Give the KasmVNC websocket a moment to finish connecting and paint the
     # remote desktop before anyone tries to click on it.
@@ -172,6 +198,23 @@ async def status() -> str:
     page = _state.get("page")
     alive = page is not None and not page.is_closed()
     return f"target={TARGET_URL} connected={alive}"
+
+
+@mcp.tool()
+async def diagnostics() -> str:
+    """Show what actually happened on the remote page since the last connect: console messages,
+    JS errors, failed network requests, and websocket open/close/error events (KasmVNC's video
+    stream rides a websocket, so this is the place to look when the stream never starts)."""
+    page = _state.get("page")
+    if page is None:
+        return "no active page -- call screenshot() or reconnect() first to establish a connection"
+    try:
+        title = await page.title()
+        url = page.url
+    except Exception as exc:  # page might be closed/crashed between calls
+        title, url = f"<error reading page: {exc}>", "<unknown>"
+    body = "\n".join(_events) if _events else "(no console/network/websocket events captured)"
+    return f"page url={url}\npage title={title!r}\n\n--- events ({len(_events)}) ---\n{body}"
 
 
 if __name__ == "__main__":
