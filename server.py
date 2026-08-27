@@ -44,6 +44,16 @@ async def _connect() -> Page:
     pw: PlaywrightContextManager = await async_playwright().start()
     browser: Browser = await pw.chromium.launch(
         headless=True,
+        # Without this, Playwright launches "chrome-headless-shell" -- a
+        # stripped-down binary built for fast DOM/JS automation, not full
+        # rendering. That's exactly what the earlier "Executable doesn't
+        # exist at .../chromium_headless_shell-.../" error was about, and
+        # is almost certainly why the KasmVNC canvas stream never starts:
+        # the shell build lacks the canvas/WebGL/media plumbing the video
+        # stream decodes into, even though page navigation works fine.
+        # channel="chromium" forces the full Chromium binary (still
+        # headless, via Chromium's own --headless=new mode) instead.
+        channel="chromium",
         args=[
             "--no-sandbox",
             "--disable-dev-shm-usage",
