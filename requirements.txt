@@ -1,7 +1,11 @@
 mcp>=1.2.0,<2
-# playwright intentionally omitted: the mcr.microsoft.com/playwright/python
-# base image already bundles the exact playwright version paired with its
-# preinstalled browser binaries. Installing/upgrading it here via pip caused
-# a version mismatch (pip pulling a newer playwright than the browsers on
-# disk). If the base image tag in the Dockerfile is ever bumped, no change
-# is needed here -- it'll stay matched automatically.
+# Pinned EXACTLY to match the browser binaries baked into the
+# mcr.microsoft.com/playwright/python:v1.47.0-jammy base image in the
+# Dockerfile. The base image provides the OS deps + downloaded Chromium
+# binary for this exact version, not a pre-installed pip package -- so
+# playwright must be installed here, but any version other than an exact
+# match (a bare `playwright` or a `>=` range) lets pip pick a newer release
+# than the browser binaries on disk, which fails at launch. If the
+# Dockerfile's base image tag is ever bumped, this pin must be bumped to
+# match in the same change.
+playwright==1.47.0
