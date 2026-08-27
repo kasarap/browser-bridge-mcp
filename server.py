@@ -97,6 +97,21 @@ async def _connect() -> Page:
             "--ignore-certificate-errors",
             "--ignore-certificate-errors-spki-list",
             "--allow-insecure-localhost",
+            # Root cause found via diagnostics(): KasmVNC's client decodes its
+            # video stream through the WebCodecs VideoDecoder API (H.264 /
+            # avc1...), and that was failing with "Config not supported" --
+            # not a cert or rendering-engine issue, a video-decode-pipeline
+            # one. There's no GPU in this container, and even *software*
+            # WebCodecs decode in Chromium is routed through the GPU process,
+            # which doesn't come up usable by default in headless+Docker.
+            # Forcing Chromium onto SwiftShader (software GL/Vulkan) gets a
+            # working GPU process up without real hardware, which is what
+            # the decoder needs to configure successfully.
+            "--use-gl=angle",
+            "--use-angle=swiftshader",
+            "--enable-unsafe-swiftshader",
+            "--disable-gpu-sandbox",
+            "--in-process-gpu",
         ],
     )
     context = await browser.new_context(
