@@ -75,16 +75,15 @@ async def _connect() -> Page:
     pw: PlaywrightContextManager = await async_playwright().start()
     browser: Browser = await pw.chromium.launch(
         headless=True,
-        # Without this, Playwright launches "chrome-headless-shell" -- a
-        # stripped-down binary built for fast DOM/JS automation, not full
-        # rendering. That's exactly what the earlier "Executable doesn't
-        # exist at .../chromium_headless_shell-.../" error was about, and
-        # is almost certainly why the KasmVNC canvas stream never starts:
-        # the shell build lacks the canvas/WebGL/media plumbing the video
-        # stream decodes into, even though page navigation works fine.
-        # channel="chromium" forces the full Chromium binary (still
-        # headless, via Chromium's own --headless=new mode) instead.
-        channel="chromium",
+        # "chromium" (open-source Chromium, no headless-shell) fixed page
+        # rendering but NOT the video stream: diagnostics showed KasmVNC's
+        # WebCodecs H.264 decoder ("avc1...") failing to configure no matter
+        # what GPU/software-rendering flags were added, which turned out to
+        # be a codec-licensing issue, not a hardware one -- open-source
+        # Chromium builds typically don't compile in proprietary H.264 at
+        # all. channel="chrome" uses real Google Chrome (installed via
+        # `playwright install chrome` in the Dockerfile), which does.
+        channel="chrome",
         args=[
             "--no-sandbox",
             "--disable-dev-shm-usage",
@@ -218,6 +217,19 @@ async def reconnect() -> str:
     await get_page()
     body = "\n".join(_events) if _events else "(no events captured)"
     return f"reconnected\n\n--- events ({len(_events)}) ---\n{body}"
+
+
+@mcp.tool()
+async def evaluate(js: str) -> str:
+    """Evaluate a JavaScript expression on the remote page and return its result as text.
+    For diagnosing things the page's own console logging doesn't surface, e.g. calling
+    VideoDecoder.isConfigSupported(...) directly to see the real rejection reason."""
+    page = await get_page()
+    try:
+        result = await page.evaluate(js)
+        return repr(result)
+    except Exception as exc:
+        return f"<error: {exc}>"
 
 
 @mcp.tool()
