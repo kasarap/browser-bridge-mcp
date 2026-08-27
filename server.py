@@ -23,6 +23,7 @@ Variables" field for this server).
 import asyncio
 import base64
 import os
+import sys
 
 from mcp.server.fastmcp import FastMCP, Image
 from playwright.async_api import async_playwright, Page, Browser
@@ -42,6 +43,11 @@ _EVENTS_MAX = 200
 
 
 def _log_event(line: str) -> None:
+    # Also mirror to stderr (never stdout -- that would corrupt the MCP
+    # JSON-RPC framing) so these are visible via plain `docker logs`,
+    # independent of whether a client's tool cache has picked up the
+    # diagnostics() tool yet.
+    print(f"[diag] {line}", file=sys.stderr, flush=True)
     _events.append(line)
     del _events[:-_EVENTS_MAX]
 
@@ -99,10 +105,13 @@ async def _connect() -> Page:
     )
     page = await context.new_page()
     _wire_diagnostics(page)
+    _log_event(f"navigating to {TARGET_URL}")
     await page.goto(TARGET_URL, wait_until="networkidle", timeout=30000)
+    _log_event("page.goto returned (networkidle) -- settling before first use")
     # Give the KasmVNC websocket a moment to finish connecting and paint the
     # remote desktop before anyone tries to click on it.
     await asyncio.sleep(CONNECT_SETTLE_SECONDS)
+    _log_event("settle wait complete")
 
     _state["playwright"] = pw
     _state["browser"] = browser
@@ -186,18 +195,25 @@ async def wait(seconds: float) -> str:
 
 @mcp.tool()
 async def reconnect() -> str:
-    """Force a fresh connection to the remote desktop. Use this if the view looks frozen or stale."""
+    """Force a fresh connection to the remote desktop. Use this if the view looks frozen or stale.
+    Returns the connection events captured during this attempt (console/network/websocket
+    activity) inline, since a separate diagnostics tool has proven unreliable to reach from
+    some clients -- this way the info always comes back on a tool we know works."""
     await _teardown()
     await get_page()
-    return "reconnected"
+    body = "\n".join(_events) if _events else "(no events captured)"
+    return f"reconnected\n\n--- events ({len(_events)}) ---\n{body}"
 
 
 @mcp.tool()
 async def status() -> str:
-    """Report whether the bridge currently has a live connection to the remote desktop, and the target URL."""
+    """Report whether the bridge currently has a live connection to the remote desktop, the
+    target URL, and the events captured since the last connect (console/network/websocket
+    activity) -- inlined here for the same reason as in reconnect()."""
     page = _state.get("page")
     alive = page is not None and not page.is_closed()
-    return f"target={TARGET_URL} connected={alive}"
+    body = "\n".join(_events) if _events else "(no events captured)"
+    return f"target={TARGET_URL} connected={alive}\n\n--- events ({len(_events)}) ---\n{body}"
 
 
 @mcp.tool()
