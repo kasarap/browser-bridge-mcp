@@ -319,7 +319,7 @@ async def read_site_storage(url_substring: str) -> str:
     local_storage = await target.evaluate(
         "() => Object.fromEntries(Object.entries(localStorage))"
     )
-    cookies = await target.context.cookies([target.url])
+    cookies = await target.context.cookies()  # all cookies in context, not just those matching target.url (misses cross-subdomain, e.g. api.monarch.com)
     cookie_map = {c["name"]: c["value"] for c in cookies}
     return json.dumps(
         {"url": target.url, "localStorage": local_storage, "cookies": cookie_map},
