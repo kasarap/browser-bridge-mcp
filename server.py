@@ -26,6 +26,7 @@ import json
 import os
 import socket
 import sys
+from urllib.parse import urlparse
 
 from mcp.server.fastmcp import FastMCP, Image
 from playwright.async_api import async_playwright, Page, Browser
@@ -319,7 +320,11 @@ async def read_site_storage(url_substring: str) -> str:
     local_storage = await target.evaluate(
         "() => Object.fromEntries(Object.entries(localStorage))"
     )
-    cookies = await target.context.cookies()  # all cookies in context, not just those matching target.url (misses cross-subdomain, e.g. api.monarch.com)
+    all_cookies = await target.context.cookies()
+    _host = urlparse(target.url).hostname or ""
+    _parts = _host.split(".")
+    _root = ".".join(_parts[-2:]) if len(_parts) >= 2 else _host
+    cookies = [c for c in all_cookies if c["domain"].lstrip(".").endswith(_root)]  # scope to the tab domain only, not the whole browser profile
     cookie_map = {c["name"]: c["value"] for c in cookies}
     return json.dumps(
         {"url": target.url, "localStorage": local_storage, "cookies": cookie_map},
