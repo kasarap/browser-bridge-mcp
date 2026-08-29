@@ -22,7 +22,9 @@ Variables" field for this server).
 
 import asyncio
 import base64
+import json
 import os
+import socket
 import sys
 
 from mcp.server.fastmcp import FastMCP, Image
@@ -241,6 +243,88 @@ async def status() -> str:
     alive = page is not None and not page.is_closed()
     body = "\n".join(_events) if _events else "(no events captured)"
     return f"target={TARGET_URL} connected={alive}\n\n--- events ({len(_events)}) ---\n{body}"
+
+
+_cdp_state: dict = {"playwright": None, "browser": None}
+_cdp_lock = asyncio.Lock()
+
+# CHROME_DEBUG_HOST/PORT: the *inner* remote-desktop Chromium's own DevTools
+# Protocol endpoint, reached over a dedicated `monarch-cdp` docker network
+# (created --internal, so it has no route out of the host at all) that only
+# the chromium container and this one are attached to -- never the public/
+# Tailscale-exposed KasmVNC path. This gives direct DOM/localStorage access
+# to whatever's already logged in there (e.g. Monarch Money via the user's
+# own SSO), without ever handling a password: the human logs in once on the
+# visible remote desktop the normal way, and this just reads the resulting
+# session out of that already-authenticated tab. Chromium (M113+) hardcodes
+# its debug port to 127.0.0.1 regardless of --remote-debugging-address, so
+# the chromium container runs a small socat relay (added via linuxserver's
+# custom-cont-init.d convention, not baked into the image) forwarding a
+# second port onto this network -- hence CHROME_DEBUG_PORT defaults to that
+# relay port (9223), not Chromium's own 9222.
+CHROME_DEBUG_HOST = os.environ.get("CHROME_DEBUG_HOST", "chromium")
+CHROME_DEBUG_PORT = os.environ.get("CHROME_DEBUG_PORT", "9223")
+
+
+async def _get_cdp_browser() -> Browser:
+    """Connect directly to the remote desktop's own Chromium via CDP (bypassing
+    the video/synthetic-input layer entirely), reusing one connection across
+    calls. Chromium's DevTools HTTP server does DNS-rebinding protection on the
+    Host header -- it only trusts "localhost" or a bare IP, not a hostname --
+    so we resolve CHROME_DEBUG_HOST ourselves and connect via IP, which makes
+    Chromium report back a webSocketDebuggerUrl using that same IP (usable
+    from this container) instead of "localhost" (which would point back at
+    this container's own loopback, not the remote Chromium's)."""
+    async with _cdp_lock:
+        browser = _cdp_state.get("browser")
+        if browser is not None and browser.is_connected():
+            return browser
+        pw = _cdp_state.get("playwright")
+        if pw is None:
+            pw = await async_playwright().start()
+            _cdp_state["playwright"] = pw
+        ip = socket.gethostbyname(CHROME_DEBUG_HOST)
+        browser = await pw.chromium.connect_over_cdp(f"http://{ip}:{CHROME_DEBUG_PORT}")
+        _cdp_state["browser"] = browser
+        return browser
+
+
+@mcp.tool()
+async def read_site_storage(url_substring: str) -> str:
+    """Read localStorage (and cookies) directly from a tab already open in the
+    remote desktop's browser, matched by a substring of its URL (e.g. "monarch"
+    or "icloud"), via a direct CDP connection on the internal monarch-cdp
+    network -- NOT via the video-streamed KasmVNC path, so this doesn't touch
+    whatever a human might currently be doing on the visible desktop.
+
+    Use this to pull a session token/cookie out of a site the user already
+    logged into there by hand, instead of ever entering credentials yourself.
+    Returns JSON: {"url": ..., "localStorage": {...}, "cookies": {...}}.
+    Returns an error string (not JSON) if no matching tab is open -- ask the
+    user to open/log into that site on the remote desktop first."""
+    browser = await _get_cdp_browser()
+    target = None
+    for context in browser.contexts:
+        for page in context.pages:
+            if url_substring.lower() in page.url.lower():
+                target = page
+                break
+        if target:
+            break
+    if target is None:
+        return (
+            f"No open tab matching '{url_substring}' found in the remote desktop's "
+            "browser. Ask the user to open/log into that site there first."
+        )
+    local_storage = await target.evaluate(
+        "() => Object.fromEntries(Object.entries(localStorage))"
+    )
+    cookies = await target.context.cookies([target.url])
+    cookie_map = {c["name"]: c["value"] for c in cookies}
+    return json.dumps(
+        {"url": target.url, "localStorage": local_storage, "cookies": cookie_map},
+        indent=2,
+    )
 
 
 @mcp.tool()
